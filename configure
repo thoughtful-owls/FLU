@@ -1,0 +1,695 @@
+#!/bin/sh
+
+# thanks to Michael Ritzert for helping to update this configure for use
+# on Sun and flavors of BSD
+
+# thanks to Ian MacArthur for jump starting the cygwin/mingw/msys support
+
+SYSTEM=`uname`
+
+# mjr++
+if test "$MY_SHELL" != "ksh" ; then
+ MY_SHELL="sh"
+ if test "$SYSTEM" = "SunOS" -o "$SYSTEM" = "NetBSD"; then
+   # OpenBSD and FreeBSD might also use a Bourne shell with no extensions
+   # but i (mjr) cannot test this
+   MY_SHELL="ksh" ksh  "$0" "$*"
+   exit
+ fi
+fi
+
+FLU_VERSION=2.14
+
+CONF_VERSION="FLU configure script v1.3"
+
+echo "$CONF_VERSION"
+
+# initialize defaults
+ENABLE_EXAMPLES=0
+ENABLE_DEBUG=0
+ENABLE_SHARED=1
+ENABLE_GL=1
+CYGWIN=0
+MINGW=0
+OSX=0
+SGI=0
+WIN32=0
+NETBSD=0
+
+if echo $SYSTEM | grep -i irix
+then
+    SGI=1
+fi
+
+if echo $SYSTEM | grep -i darwin
+then
+    OSX=1
+fi
+
+if echo $SYSTEM | grep -i NetBSD
+then
+    NETBSD=1
+fi
+
+if echo $SYSTEM | grep -i cygwin
+then
+    CYGWIN=1
+    WIN32=1
+    ENABLE_SHARED=0
+    CXXFLAGS=$CXXFLAGS" -DFLU_USE_REGISTRY"
+fi
+
+if echo $SYSTEM | grep -i mingw
+then
+    MINGW=1
+    WIN32=1
+    ENABLE_SHARED=0
+    CXXFLAGS=$CXXFLAGS" -DFLU_USE_REGISTRY"
+fi
+
+print_help_and_exit()
+{
+echo "
+Use: configure [options]
+Options: [defaults are in brackets after description]
+[--disable can be substituted for --enable]
+  --help                     this message
+  --prefix=PREFIX            install files in PREFIX [/usr/local]
+  --exec-prefix=EPREFIX      install architecture-dependent files in EPREFIX [same as prefix]
+  --bindir=DIR               user executables in DIR [EPREFIX/bin]
+  --includedir=DIR           C header files in DIR [PREFIX/include]
+  --libdir=DIR               object code libraries in DIR [EPREFIX/lib]
+  --enable-examples          compile example programs
+  --disable-examples         don't compile example programs [default]
+  --enable-debug             compile with debug info
+  --disable-debug            don't compile with debug info [default]
+  --enable-shared            compile shared libraries [default]
+  --disable-shared           don't compile shared libraries
+  --enable-gl                include OpenGL support [default]
+  --disable-gl               don't include OpenGL support
+  --fltk=DIR                 specify the nonstandard location of FLTK as directory DIR
+  --I=DIR                    add DIR to the -I includes line (i.e. CXXFLAGS)
+  --L=DIR                    add DIR to the -L libs line (i.e. LDFLAGS)
+"
+exit
+}
+
+BASE=`pwd`
+
+PREFIX="/usr/local"
+EPREFIX=
+IPREFIX=
+LPREFIX=
+BPREFIX=
+CXXFLAGS="$CXXFLAGS"    # mjr++: let environment add compiling options
+LDFLAGS="$LDFLAGS"      #        in analogy to clean GNU configure
+MAKE="$MAKE"            #        is this a good place to fetch info
+                        #        from fltk-config?
+LDFLAGS_STATIC=
+LDFLAGS_SHARED=
+LDLIBS=
+EXTRAS=
+GL_EXTRAS=
+
+c_CXX=$CXX
+c_CC=$CC
+
+HAVE_FPIC=
+
+if test -z "$c_CXX"
+then
+    if test `uname` = "IRIX64"
+    then
+        c_CXX=CC
+    else
+        c_CXX=g++
+    fi
+fi
+if test -z "$c_CC"
+then
+    if test `uname` = "IRIX64"
+    then
+        c_CC=cc
+    else
+        c_CC=gcc
+    fi
+fi
+
+if test $OSX -eq 1
+then
+    SHARED_EXT="dylib"
+else
+    SHARED_EXT="so"
+fi
+
+if test $WIN32 -eq 1
+then
+    EXE_EXT=".exe"
+else
+    EXE_EXT=""
+fi
+
+INCLUDES="-I$BASE"
+REQUIRED_HEADERS="FL/Fl.H"
+REQUIRED_LIBS="libfltk"
+
+HEADER_SEARCH_PATH="/usr/include /usr/local/include"
+if test -d /usr/lib64
+then
+    LIB_SEARCH_PATH=$LIB_SEARCH_PATH" /usr/lib64 "
+elif test -d /usr/lib
+then
+    LIB_SEARCH_PATH=$LIB_SEARCH_PATH" /usr/lib "
+fi
+if test -d /usr/local/lib64
+then
+    LIB_SEARCH_PATH=$LIB_SEARCH_PATH" /usr/local/lib64 "
+elif test -d /usr/local/lib
+then
+    LIB_SEARCH_PATH=$LIB_SEARCH_PATH" /usr/local/lib "
+fi
+#LIB_SEARCH_PATH="/usr/lib /usr/local/lib"
+
+# mjr++
+# DANGER! this is not always true -
+# NetBSD 1.6.1 default toolchain does not search /usr/local/include
+# however, /usr/pkg/{include,lib} must always be considered, since this
+# would be the place where FLTK or FLU were installed as packages
+# /usr/X11R6/{include,lib}
+# fltk-config should give the correct info
+
+if test $NETBSD -eq 1
+then
+  HEADER_SEARCH_PATH=$HEADER_SEARCH_PATH" /usr/pkg/include"
+  LIB_SEARCH_PATH=$LIB_SEARCH_PATH" /usr/pkg/lib"
+  INCLUDES="$INCLUDES -I/usr/pkg/include -I/usr/local/include"
+  LDFLAGS="$LDFLAGS -L/usr/pkg/lib -L/usr/local/lib"
+fi
+
+if test $CYGWIN -eq 1
+then
+  HEADER_SEARCH_PATH=$HEADER_SEARCH_PATH" /usr/include/w32api"
+  LIB_SEARCH_PATH=$LIB_SEARCH_PATH" /usr/lib/w32api"
+fi
+
+if test $MINGW -eq 1
+then
+  HEADER_SEARCH_PATH=$HEADER_SEARCH_PATH" /mingw/include"
+  LIB_SEARCH_PATH=$LIB_SEARCH_PATH" /mingw/lib"
+fi
+
+date=`date`
+
+#########################
+# process the command line
+
+# first check for "--help" or "-h"
+for i in $*
+do
+  if test "$i" = "--help" -o "$i" = "-h"
+  then
+    print_help_and_exit
+  fi
+done
+
+echo "# last run of 'configure' on $date" > configure-last
+# echo -n "./configure " >> configure-last
+echo -n "$0 " >> configure-last
+
+# now process all remaining options
+LOCAL_FLTK=""
+for i in $*
+do
+  echo -n "$i " >> configure-last
+  option=`echo $i | cut -f1 -d"="`
+  value=`echo $i | cut -f2 -d"="`
+  case $option in
+      "--prefix")
+	  PREFIX="$value"
+	  ;;
+      "--includedir")
+	  IPREFIX="$value"
+	  ;;
+      "--libdir")
+	  LPREFIX="$value"
+	  ;;
+      "--enable-examples")
+	  ENABLE_EXAMPLES=1
+	  ;;
+      "--disable-examples")
+	  ENABLE_EXAMPLES=0
+	  ;;
+      "--enable-shared")
+	  if test $CYGWIN -eq 1 -o $MINGW -eq 1
+	  then
+	    echo "Warning: Shared libraries are not supported with this compiler."
+	    ENABLE_SHARED=0
+	  else
+	    ENABLE_SHARED=1
+	  fi
+	  ;;
+      "--disable-shared")
+	  ENABLE_SHARED=0
+	  ;;
+      "--enable-debug")
+	  ENABLE_DEBUG=1
+	  ;;
+      "--disable-debug")
+	  ENABLE_DEBUG=0
+	  ;;
+      "--enable-gl")
+	  ENABLE_GL=1 
+	  ;;
+      "--disable-gl")
+	  ENABLE_GL=0 
+	  ;;
+      "--I")
+	  INCLUDES=$INCLUDES" -I$value"
+	  HEADER_SEARCH_PATH=$HEADER_SEARCH_PATH" $value"
+	  ;;
+      "--L")
+	  LDFLAGS=$LDFLAGS" -L$value"
+	  LIB_SEARCH_PATH=$LIB_SEARCH_PATH" $value"
+	  ;;
+      "--fltk")
+	  INCLUDES=$INCLUDES" -I$value"
+	  HEADER_SEARCH_PATH=$HEADER_SEARCH_PATH" $value"
+	  LDFLAGS_STATIC=" -L$value/lib"
+	  LDFLAGS_SHARED=" -L$value/src"
+	  LIB_SEARCH_PATH=$LIB_SEARCH_PATH" $value/lib"
+	  LOCAL_FLTK="$value/"
+	  ;;
+      *)
+	  echo "Unknown option '$option'"
+	  print_help_and_exit
+	  ;;
+  esac
+done
+echo "" >> configure-last
+chmod +x configure-last
+
+if test -z "$EPREFIX"; then EPREFIX=$PREFIX; fi
+if test -z "$IPREFIX"; then IPREFIX=$PREFIX/include; fi
+if test -z "$LPREFIX"; then LPREFIX=$EPREFIX/lib; fi
+if test -z "$BPREFIX"; then BPREFIX=$EPREFIX/bin; fi
+
+#########################
+
+# do we have necessary compiler support?
+
+echo -n "Checking whether $c_CC accepts -fPIC""..."
+echo 'void f(){}' > conftest.c
+if test -z "`${c_CC} -fPIC -c conftest.c 2>&1`"; then
+    HAVE_FPIC="-fPIC"
+    echo "yes"
+else
+    echo "no"
+fi
+rm -f conftest*
+
+
+#########################
+
+# do we have the required support libs?
+
+echo "Checking for required libs..."
+
+if test $ENABLE_GL -eq 1 
+then
+    if test $OSX -eq 1
+    then
+	REQUIRED_HEADERS=$REQUIRED_HEADERS" gl.h glu.h"
+	HEADER_SEARCH_PATH=$HEADER_SEARCH_PATH" /System/Library/Frameworks/OpenGL.framework/Versions/A/Headers"
+	LIB_SEARCH_PATH=$LIB_SEARCH_PATH" /System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries"
+	REQUIRED_LIBS=$REQUIRED_LIBS" libfltk_gl libGL libGLU"
+    elif test $CYGWIN -eq 1 -o $MINGW -eq 1
+    then
+	REQUIRED_HEADERS=$REQUIRED_HEADERS" GL/gl.h GL/glu.h"
+	REQUIRED_LIBS=$REQUIRED_LIBS" libfltk_gl libopengl32 libglu32"
+    else
+	REQUIRED_HEADERS=$REQUIRED_HEADERS" GL/gl.h GL/glu.h"
+	REQUIRED_LIBS=$REQUIRED_LIBS" libfltk_gl libGL libGLU"
+    fi
+fi
+
+QUIT=0
+for i in $REQUIRED_HEADERS
+do
+  echo "  $i"
+  found=0
+  for j in $HEADER_SEARCH_PATH
+  do
+     if test -f $j/$i; then found=1; fi
+  done
+  if test $found -eq 0
+  then
+      echo "Cannot find required file '$i'. Perhaps you are missing the library"
+      echo "containing this file or it is installed in a nonstandard location."
+      echo "Either install the necessary library, or if it is installed in a nonstandard"
+      echo 'location use the "--I=DIR" option.'
+      echo 'If this is an FLTK header, use the "--fltk=DIR" option.'
+      QUIT=1
+  fi
+done
+for i in $REQUIRED_LIBS
+do
+  echo "  $i"
+  found=0
+  for j in $LIB_SEARCH_PATH
+  do
+    if (test -f $j/$i.$SHARED_EXT || test -f $j/$i.a ); then found=1; fi
+  done
+  if test $found -eq 0
+  then
+      echo "Cannot find required lib '$i'. Perhaps you are missing the library"
+      echo "or it is installed in a nonstandard location."
+      echo "Either install the necessary library, or if it is installed in a nonstandard"
+      echo 'location use the "--L=DIR" option.'
+      echo 'If this is an FLTK lib, use the "--fltk=DIR" option.'
+      QUIT=1
+  fi
+done
+if test $QUIT -eq 1; then exit; fi
+
+#########################
+
+# create the makeinclude file
+
+echo "Creating makeinclude..."
+
+echo "# generated on $date by $CONF_VERSION" > makeinclude
+
+echo "VERSION = $FLU_VERSION" >> makeinclude
+
+echo "ENABLE_SHARED = $ENABLE_SHARED" >> makeinclude
+echo "ENABLE_GL = $ENABLE_GL" >> makeinclude
+
+if test $ENABLE_DEBUG -eq 1 
+then
+    CXXFLAGS=$CXXFLAGS" -g"
+else
+    CXXFLAGS=$CXXFLAGS" -O2"
+fi
+
+if test $OSX -eq 1
+then
+    CXXFLAGS=$CXXFLAGS""
+elif test $CYGWIN -eq 1 -o $MINGW -eq 1
+then
+    if test $CYGWIN -eq 1
+    then
+	CXXFLAGS=$CXXFLAGS" -Wall -Wunused -fno-exceptions -DWIN32 -DCYGWIN"
+    else
+	CXXFLAGS=$CXXFLAGS" -Wall -Wunused -fno-exceptions -DWIN32 -DMINGW"
+    fi
+    if test $ENABLE_DEBUG -eq 1
+    then
+        CXXFLAGS="-mwindows "$CXXFLAGS
+	LDLIBS=$LDLIBS" -mwindows"
+    fi
+else
+    CXXFLAGS=$CXXFLAGS" -Wall -Wunused -fno-exceptions"
+fi
+
+if test $ENABLE_SHARED -eq 1
+then
+    CXXFLAGS="$CXXFLAGS $HAVE_FPIC"
+fi
+
+CXXFLAGS="$CXXFLAGS $INCLUDES"
+if test -z "$LDFLAGS_STATIC"; then LDFLAGS_STATIC=" -L$EPREFIX/lib"; fi
+if test -z "$LDFLAGS_SHARED"; then LDFLAGS_SHARED=" -L$EPREFIX/src"; fi
+
+LDLIBS=$LDLIBS" -lflu -lfltk"
+if test $ENABLE_GL -eq 1 
+then
+    LDLIBS="-lflu_gl -lfltk_gl "$LDLIBS
+fi
+
+if test $ENABLE_GL -eq 1 
+then
+    if test $OSX -eq 1
+    then
+	LDLIBS=$LDLIBS" -framework AGL -framework OpenGL "
+    elif test $CYGWIN -eq 1 -o $MINGW -eq 1
+    then
+	LDLIBS=$LDLIBS" -lglu32 -lopengl32 "
+    else
+	LDLIBS=$LDLIBS" -lGL -lGLU "
+    fi
+fi
+
+if test $OSX -eq 1
+then
+    LDLIBS=$LDLIBS" -lobjc -framework Carbon"
+elif test $CYGWIN -eq 1 -o $MINGW -eq 1
+then
+    LDLIBS=$LDLIBS" -lole32 -luuid -lcomctl32 -lwsock32 -lsupc++"
+else
+    LDLIBS=$LDLIBS" -lX11 -lXmu"
+fi
+
+echo "CXX = $c_CXX" >> makeinclude
+echo "CC = $c_CC" >> makeinclude
+
+# SGI specific stuff
+if test $SGI -eq 1
+then
+    CXXFLAGS=$CXXFLAGS" -n32 -DSGI -ptused -LANG:ansi-for-init-scope=ON -LANG:exceptions=OFF"
+    echo "SHARED_FLAG = -shared" >> makeinclude
+    echo "ARCHIVE = ar -crs" >> makeinclude
+# Mac OSX specific stuff
+elif test $OSX -eq 1
+then
+    CXXFLAGS=$CXXFLAGS" -fno-default-inline"
+    echo "SHARED_FLAG = -dynamiclib" >> makeinclude
+    echo "ARCHIVE = libtool -static -o" >> makeinclude
+    if test -z "$LOCAL_FLTK"
+    then
+	EXTRAS=$EXTRAS" -lfltk -framework Carbon"
+    else
+	EXTRAS=$EXTRAS" '-L$LOCAL_FLTK'src -lfltk -framework Carbon"
+    fi
+    GL_EXTRAS=$GL_EXTRAS" -L. -lflu "$EXTRAS" -lfltk_gl -framework AGL -framework OpenGL"
+# Linux specific stuff
+else
+    echo "SHARED_FLAG = -shared" >> makeinclude
+    echo "ARCHIVE = ar -crs" >> makeinclude
+    if test $WIN32 -eq 0
+    then
+	if test -d /usr/X11R6/lib64
+	then
+	    LDFLAGS=$LDFLAGS" -L/usr/X11R6/lib64"
+	else
+	    LDFLAGS=$LDFLAGS" -L/usr/X11R6/lib"
+	fi
+    fi
+fi
+
+if test $NETBSD -eq 1
+then
+    # mjr: BSD make will not handle the makefiles. GNU make must be used instead
+    # possibly also on {Free,Open}BSD
+    echo "MAKE = gmake"  >> makeinclude
+fi
+
+echo "SHARED_EXT = $SHARED_EXT" >> makeinclude
+echo "EXE_EXT = $EXE_EXT" >> makeinclude
+echo "CXXFLAGS = $CXXFLAGS" >> makeinclude
+echo "LDFLAGS = $LDFLAGS" >> makeinclude
+echo "LDFLAGS_STATIC = $LDFLAGS_STATIC" >> makeinclude
+echo "LDFLAGS_SHARED = $LDFLAGS_SHARED" >> makeinclude
+echo "LDLIBS = $LDLIBS" >> makeinclude
+echo "EXTRAS = $EXTRAS" >> makeinclude
+echo "GL_EXTRAS = $GL_EXTRAS" >> makeinclude
+echo "PREFIX = $PREFIX" >> makeinclude
+echo "EPREFIX = $EPREFIX" >> makeinclude
+echo "IPREFIX = $IPREFIX" >> makeinclude
+echo "LPREFIX = $LPREFIX" >> makeinclude
+echo "BPREFIX = $BPREFIX" >> makeinclude
+
+##########################
+
+# create the Makefile
+
+echo "Creating Makefile..."
+
+echo "# generated on $date by $CONF_VERSION
+" > Makefile
+
+if test $ENABLE_EXAMPLES -eq 1
+then
+    echo "DIRS = src examples" >> Makefile
+else
+    echo "DIRS = src" >> Makefile
+fi
+
+echo '
+include ./makeinclude
+
+all: makeinclude
+	@for dir in $(DIRS); do \
+	  echo "=== making $$dir ===";\
+	  (cd $$dir; $(MAKE) $(MFLAGS)) || break;\
+	done
+
+clean:
+	@for dir in $(DIRS); do \
+	  echo "=== cleaning $$dir ===";\
+	  (cd $$dir; $(MAKE) $(MFLAGS) clean) || break;\
+	done
+
+install: makeinclude
+	@ echo "=== installing FLU ==="
+	@ echo "Installing binaries in $(BPREFIX)..."
+	@ mkdir -p $(BPREFIX)
+	@ rm -f $(BPREFIX)/flu-config
+	@ cp flu-config $(BPREFIX)
+	@ chmod 755 $(BPREFIX)/flu-config
+	@for dir in FLU $(DIRS); do \
+	  (cd $$dir; $(MAKE) $(MFLAGS) install) || break;\
+	done
+
+uninstall: makeinclude
+	@ echo "=== uninstalling FLU ==="
+	@ echo "Uninstalling binaries from $(BPREFIX)..."
+	@ rm -f $(BPREFIX)/flu-config
+	@for dir in FLU $(DIRS); do \
+	  (cd $$dir; $(MAKE) $(MFLAGS) uninstall) || break;\
+	done
+' >> Makefile
+
+##########################
+
+# create flu-config
+
+echo "Creating flu-config..."
+
+echo "#!/bin/$MY_SHELL"  > flu-config
+echo "# generated on $date by $CONF_VERSION" >> flu-config
+
+echo '
+
+print_help_and_exit()
+{
+echo "
+Use: flu-config [options]
+Options:
+  --help                 this message
+  --local                use local build instead of system install
+  --use-gl               use OpenGL
+  --cxxflags             return flags to compile against FLU using C++
+  --ldflags              return flags to link against FLU
+  --ldstaticflags        return flags to link against static FLU libs
+                              even if DSOs are installed
+  --libs                 return the necessary libs to link to FLU
+"
+exit
+}
+
+#########################
+# process the command line
+
+if test $# -eq 0
+then
+    print_help_and_exit
+fi    
+
+USE_GL=""
+GL_LIB=""
+GL_DSO=""
+LOCAL=0
+# first check for "--help" or "-h" or "--use-gl"
+for i in $*
+do
+  if test "$i" = "--help" -o "$i" = "-h"
+  then
+    print_help_and_exit
+  fi
+  if test "$i" = "--local"
+  then
+    LOCAL=1
+    shift
+  fi
+  if test "$i" = "--use-gl"
+  then
+    USE_GL="--use-gl"
+  fi
+done
+
+if test $LOCAL -eq 1
+then
+  if test -f '$LOCAL_FLTK'fltk-config
+  then
+    chmod +x '$LOCAL_FLTK'fltk-config
+  fi
+  FLTK_CONFIG='$LOCAL_FLTK'fltk-config
+else
+  FLTK_CONFIG=`which fltk-config`
+  if test -z "$FLTK_CONFIG"
+  then
+    echo "Cannot find fltk-config. Be sure FLTK is installed."
+    exit
+  fi
+fi
+
+if ! test -z "$USE_GL"
+then
+    if test $LOCAL -eq 1
+    then
+      GL_DSO="-lflu_gl"
+      GL_LIB="-lflu_gl"
+    else
+      GL_DSO="-lflu_gl"
+      GL_LIB='$LPREFIX/libflu_gl.a'
+    fi
+fi
+
+# now process all remaining options
+for i in $*
+do
+  case $i in
+      "--cxxflags")
+          if test $LOCAL -eq 1
+          then
+	    echo -n '$INCLUDES' `$FLTK_CONFIG $USE_GL --cxxflags`
+          else
+	    echo -n '-I$PREFIX/include' `$FLTK_CONFIG $USE_GL --cxxflags`
+          fi
+	  ;;
+      "--ldstaticflags")
+          if test $LOCAL -eq 1
+          then
+            echo -n '-L$BASE/lib' '-L$LOCAL_FLTK'lib $GL_LIB -lflu `$FLTK_CONFIG $USE_GL --ldflags`
+          else
+            echo -n $GL_LIB '$LPREFIX/libflu.a' `$FLTK_CONFIG $USE_GL --ldstaticflags`
+          fi
+	  ;;
+      "--ldflags")
+          if test $LOCAL -eq 1
+          then
+            echo -n '-L$BASE/src' '-L$LOCAL_FLTK'src $GL_DSO -lflu `$FLTK_CONFIG $USE_GL --ldflags`
+          else
+            echo -n '-L$LPREFIX' $GL_DSO -lflu `$FLTK_CONFIG $USE_GL --ldflags`
+          fi
+	  ;;
+      "--libs")
+          echo -n $GL_LIB '$LPREFIX/libflu.a'
+	  ;;
+      "--use-gl")
+          ;;
+      *)
+	  echo "Unknown option $i"
+	  print_help_and_exit
+	  ;;
+  esac
+done
+echo
+' >> flu-config
+chmod +x flu-config
+
+##########################
+
+# done
+
+echo "done"
